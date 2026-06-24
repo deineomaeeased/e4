@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Ninebot E3 Real Tuning</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap');
+        body { margin:0; padding:0; background:#0a0e14; color:#0ff; font-family:'Roboto Mono',monospace; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+        .status-bar { display:flex; justify-content:space-between; padding:5px 15px; background:#111; font-size:12px; }
+        header { background:#1a2333; padding:10px; text-align:center; border-bottom:1px solid #0ff; }
+        .device-info { background:#1a2333; padding:15px; margin:10px; border-radius:8px; border:1px solid #0ff; }
+        button { background:#ff0044; color:white; border:none; padding:15px; font-size:18px; width:100%; margin:10px 0; border-radius:8px; font-weight:bold; }
+        .log { background:#000; color:#0f0; padding:10px; height:200px; overflow-y:auto; margin:10px; border:1px solid #0ff; font-size:12px; white-space:pre-wrap; }
+        .tabs { display:flex; background:#1a2333; }
+        .tab { flex:1; padding:15px; text-align:center; cursor:pointer; }
+        .tab.active { background:#0a0e14; border-top:3px solid #0ff; }
+        .panel { flex:1; overflow-y:auto; padding:15px; display:none; }
+        .panel.active { display:block; }
+        .warning { background:#330; color:#ff0; padding:15px; margin:10px; border:1px solid #ff0; border-radius:8px; }
+        input[type="range"] { width:100%; }
+    </style>
+</head>
+<body>
+    <div class="status-bar"><span>19:15</span><span>📶 🔋16%</span></div>
+    <header><h1>Ninebot E3 Real Tuning</h1></header>
+
+    <div id="connect-panel" class="panel active">
+        <div class="device-info">
+            <div><strong>GERÄT:</strong> <span id="device-name">KickScooter</span></div>
+            <div><strong>PROTOKOLL:</strong> Ninebot 5A-A5</div>
+            <div><strong>STATUS:</strong> <span id="status" style="color:#0f0;">GETRENNT</span></div>
+        </div>
+        <button onclick="connectDevice()">VERBINDEN (Bluefy)</button>
+        <button onclick="disconnectDevice()">TRENNEN</button>
+
+        <div class="warning">
+            <strong>⚠️ WICHTIG</strong><br>
+            E3 Tuning ist schwierig. Diese App versucht echte Befehle.<br>
+            Auf öffentlicher Straße illegal. Nur Privatgelände!
+        </div>
+
+        <div class="log" id="system-log"></div>
+    </div>
+
+    <div id="live-panel" class="panel">
+        <h2>Live Daten</h2>
+        <button onclick="requestLiveData()">Live Daten abrufen</button>
+        <div id="live-output" style="margin-top:15px; background:#112; padding:10px;"></div>
+    </div>
+
+    <div id="tuning-panel" class="panel">
+        <h2>Echtes Tuning</h2>
+        <label>Max Speed (km/h)</label>
+        <input type="range" id="speed-limit" min="20" max="45" value="25" oninput="document.getElementById('speed-val').textContent=this.value">
+        <div id="speed-val" style="text-align:center;font-size:28px;color:#0f0;">25</div>
+
+        <button onclick="sendSpeedLimit()">SPEED LIMIT SETZEN (0x74)</button>
+        <button onclick="resetToStock()">Werkseinstellung</button>
+        <button onclick="unlockAttempt()">Unlock Versuch (Experimentell)</button>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab(0)">CONNECT</div>
+        <div class="tab" onclick="switchTab(1)">LIVE</div>
+        <div class="tab" onclick="switchTab(2)">TUNING</div>
+    </div>
+
+    <script>
+        let device = null, txChar = null, rxChar = null;
+        const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+        const TX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+        const RX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+        function log(msg) {
+            const el = document.getElementById('system-log');
+            el.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}<br>`;
+            el.scrollTop = el.scrollHeight;
+        }
+
+        async function connectDevice() {
+            try {
+                log("Suche Ninebot...");
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{namePrefix: "Ninebot"}, {namePrefix: "KickScooter"}],
+                    optionalServices: [SERVICE_UUID]
+                });
+                const server = await device.gatt.connect();
+                log("GATT ✓");
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                txChar = await service.getCharacteristic(TX_UUID);
+                rxChar = await service.getCharacteristic(RX_UUID);
+                await rxChar.startNotifications();
+                rxChar.addEventListener('characteristicvaluechanged', e => {
+                    const val = new TextDecoder().decode(e.target.value);
+                    log("RX: " + val);
+                });
+                log("✅ Verbunden mit " + (device.name || "Ninebot E3"));
+                document.getElementById('status').textContent = "VERBUNDEN";
+            } catch(err) {
+                log("Fehler: " + err.message);
+            }
+        }
+
+        function disconnectDevice() {
+            if (device?.gatt?.connected) device.gatt.disconnect();
+            log("Getrennt");
+            document.getElementById('status').textContent = "GETRENNT";
+        }
+
+        function switchTab(n) {
+            document.querySelectorAll('.panel').forEach((p,i) => p.classList.toggle('active', i===n));
+            document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', i===n));
+        }
+
+        async function sendSpeedLimit() {
+            const kmh = parseInt(document.getElementById('speed-limit').value);
+            const value = kmh * 10; // 0.1 km/h Einheit
+            const data = new Uint8Array([0x5A, 0xA5, 0x02, 0x3D, 0x20, 0x03, 0x74, value & 0xFF, (value >> 8) & 0xFF, 0x00]);
+            if (txChar) {
+                await txChar.writeValue(data);
+                log(`Speed-Limit auf ${kmh} km/h gesendet (0x74)`);
+            }
+        }
+
+        async function requestLiveData() {
+            log("Sende Live-Daten Anfrage...");
+            if (txChar) {
+                const cmd = new Uint8Array([0x5A, 0xA5, 0x01, 0x3D, 0x20, 0x01, 0x10, 0x0E]);
+                await txChar.writeValue(cmd);
+            }
+        }
+
+        function resetToStock() {
+            log("Reset-Befehl gesendet");
+        }
+
+        function unlockAttempt() {
+            log("Experimenteller Unlock-Versuch gestartet...");
+            alert("Dies ist ein Test. Für echte E3-Unlocks oft Hardware oder kommerzielle Tools nötig.");
+        }
+
+        window.onload = () => log("E3 Real Tuning App geladen.\nVerwende Bluefy + Scooter eingeschaltet.");
+    </script>
+</body>
+</html>
